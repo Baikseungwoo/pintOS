@@ -95,6 +95,8 @@ struct thread
     struct list donations;         /* List of priority donations. */
     struct list_elem donation_elem; /* List element for donations. */
 
+    int exit_status;
+
     struct list_elem allelem;           /* List element for all threads list. */
 
     //modified by me
