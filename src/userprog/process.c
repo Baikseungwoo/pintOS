@@ -26,10 +26,11 @@ static bool load (const char *cmdline, void (**eip) (void), void **esp);
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *file_name)
 {
-  char *fn_copy;
+  char *fn_copy, *file_name_copy, *save_ptr, *program_name;
   tid_t tid;
+
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
@@ -38,12 +39,29 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+
+  file_name_copy = palloc_get_page (0);
+  if (file_name_copy == NULL) {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+  strlcpy (file_name_copy, file_name, PGSIZE);
+
+
+  program_name = strtok_r (file_name_copy, " ", &save_ptr);
+
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (program_name, PRI_DEFAULT, start_process, fn_copy);
+
+
+  palloc_free_page (file_name_copy);
+ 
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (fn_copy);
   return tid;
 }
+
 
 /* A thread function that loads a user process and starts it
    running. */
@@ -51,18 +69,39 @@ static void
 start_process (void *file_name_)
 {
   char *file_name = file_name_;
+  char *copy_file_name; //pointer to save the copy of file_name
+  char *argv[64]; //array to save the arguments
+  int argc = 0; //number of arguments
   struct intr_frame if_;
   bool success;
 
+  copy_file_name = malloc(strlen(file_name) + 1); //allocate memory for copy_file_name
+  if (copy_file_name == NULL) //check if memory allocation was successful
+    thread_exit();
+  strlcpy(copy_file_name, file_name, strlen(file_name) + 1); //copy file_name to copy_file_name
+
+  char *token, *save_ptr; //token and save_ptr for strtok_r
+  for (token = strtok_r(copy_file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) {
+    argv[argc++] = token; //store the arguments in argv
+  }
+
+  
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (argv[0], &if_.eip, &if_.esp);
+
+  if(success) {
+    argument_stack(argv, argc, &if_.esp); //call argument_stack to set up the stack
+    hex_dump(if_.esp , if_.esp , PHYS_BASE - if_.esp , true);
+  }
 
   /* If load failed, quit. */
   palloc_free_page (file_name);
+  free(copy_file_name); //free the allocated memory for copy_file_name
+
   if (!success) 
     thread_exit ();
 
@@ -88,6 +127,11 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  volatile int i;
+    for(i=0; i<1000000000; i++)
+  {
+  }
+
   return -1;
 }
 
@@ -116,6 +160,8 @@ process_exit (void)
     }
 }
 
+
+
 /* Sets up the CPU for running user code in the current
    thread.
    This function is called on every context switch. */
@@ -130,6 +176,43 @@ process_activate (void)
   /* Set thread's kernel stack for use in processing
      interrupts. */
   tss_update ();
+}
+
+void
+argument_stack(const char* argv[], int argc, void **esp){
+  uintptr_t arg_addr[128];   //array to save the addresses of the copy of arguments
+  int i;
+  for (i = argc - 1; i >= 0; i--) {   //reverse order because stack grows down
+    int len = strlen(argv[i]) + 1;      // the length of the argument + 1 for null terminator
+    *esp -= len;                    //reduce the stack pointer by the length of the argument
+    memcpy(*esp, argv[i], len);     //copy the argument to the stack
+    arg_addr[i] = (uintptr_t)(*esp);    //save the address of the copy of argument
+  }
+
+  while ((uintptr_t)(*esp) % 4 != 0) {     //align the stack pointer to 4 bytes
+    *esp -= 1;
+    *(uint8_t *)(*esp) = 0;         //zero the remaining bytes
+  }                  
+  
+
+  *esp -= 4;             //reduce the stack pointer by the size of a pointer
+  *(uint32_t *)(*esp) = 0;     //null terminator for the last argument
+
+  for (i = argc - 1; i >= 0; i--) {     //push the addresses of the arguments to the stack
+    *esp -= 4;
+    *(uintptr_t *)(*esp) = arg_addr[i];
+  }
+
+  uintptr_t argv_start = (uintptr_t)(*esp);        //save the start address of the aaray of pointers to the arguments
+
+  *esp -= 4;       //push the start address of the array of pointers to the stack
+  *(uintptr_t *)(*esp) = argv_start;
+
+  *esp -= 4;
+  *(int *)*esp = argc;        //push the number of arguments to the stack
+
+  *esp -= 4;      //push the return address
+  *(uintptr_t *)(*esp) = 0;         //In fact, there is no return address, so the value is 0
 }
 
 /* We load ELF binaries.  The following definitions are taken
