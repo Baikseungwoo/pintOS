@@ -4,7 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
-
+#include "userprog/syscall.h"
 /* States in a thread's life cycle. */
 enum thread_status
   {
@@ -106,10 +106,11 @@ struct thread
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 
-#ifdef USERPROG
+#ifdef USERPROG    
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
 #endif
+   struct fdt *fdt;  
 
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */

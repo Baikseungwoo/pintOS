@@ -15,7 +15,10 @@
 #include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+#include "filesys/file.h"
 #endif
+
+
 
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
@@ -366,6 +369,19 @@ thread_exit (void)
 #ifdef USERPROG
   process_exit ();
 #endif
+struct thread *t = thread_current ();
+if (t->fdt != NULL) {
+  int i;
+  for (i = 0; i < 64; i++) {
+    if (t->fdt->table[i] != NULL) {
+      file_close(t->fdt->table[i]->file_struct);
+      palloc_free_page(t->fdt->table[i]);
+      t->fdt->table[i] = NULL;
+    }
+  }
+  palloc_free_page(t->fdt);
+  t->fdt = NULL;
+}
 
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
@@ -652,7 +668,24 @@ init_thread (struct thread *t, const char *name, int priority)
 
   t->magic = THREAD_MAGIC;
   list_push_back (&all_list, &t->allelem);
+
+  //modified my me project #2
+  t->fdt = palloc_get_page(PAL_ZERO);
+  if (t->fdt == NULL)
+    PANIC("Failed to allocate FDT!");
+
+
+// Reserve file descriptor 0 for standard input (stdin)
+  t->fdt->table[0] = NULL;
+// Reserve file descriptor 1 for standard output (stdout)
+  t->fdt->table[1] = NULL;
+  // Reserve file descriptor 2 for standard error (stderr)
+  t->fdt->table[2] = NULL;
+  // Initialize next_fd
+  t->fdt->next_fd = 3;
 }
+
+
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and
    returns a pointer to the frame's base. */

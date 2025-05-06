@@ -8,12 +8,21 @@
 #include "userprog/pagedir.h"       // pagedir_get_page()
 #include "devices/shutdown.h"       // shutdown_power_off()
 #include "userprog/process.h"       // process_wait()
+#include "userprog/syscall.h"
+#include "threads/synch.h"
+#define STDIN 0
+#define STDOUT 1
+#define STDERR 2
 
 static void syscall_handler (struct intr_frame *);
+static struct list open_files;
+static struct lock fs_lock;        //lock for file system
 
 void
 syscall_init (void) 
 {
+  list_init(&open_files);          //initialize the open_files list
+  lock_init(&fs_lock);            //initialize the fs_lock
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
@@ -47,6 +56,25 @@ syscall_handler (struct intr_frame *f UNUSED)
       }
       f->eax = wait((tid_t) esp[1]); //call wait() function with the parameter and store the return value in f->eax
       break;
+
+    case SYS_WRITE: {
+      int fd = (int)esp[1];
+      void *buffer = (void *)esp[2];
+      unsigned size = (unsigned)esp[3];
+
+      if (!is_valid_ptr(buffer)) {
+          exit(-1);
+      }
+      unsigned i;
+      for (i = 0; i < size; i++) {
+          if (!is_valid_ptr((char *)buffer + i)) {
+              exit(-1);
+          }
+      }
+
+      f->eax = write(fd, buffer, size);
+      break;
+    }
     
     default:               //if syscall_number is not in the list
       exit(-1);          // exit
@@ -80,3 +108,52 @@ void halt(void) {
   shutdown_power_off();
 }
 
+struct
+file_descriptor *get_open_file(int fd){
+  struct list_elem *e;                   //define e to iterate through the list
+  for(e = list_begin(&open_files); e != list_end(&open_files); e = list_next(e)){      //repeat until the end of the list
+    struct file_descriptor *fd_struct = list_entry(e, struct file_descriptor, elem);    //get the file descriptor struct from the list element
+    if(fd_struct->fd_num == fd && fd_struct->owner == thread_current()->tid){           //check if the fd_num and owner match
+      return fd_struct;                //return the file descriptor struct if found                             
+    }
+  }
+  return NULL;            //if not found
+}
+
+
+int write(int fd, const void *buffer, unsigned size) {
+    int status = -1;
+
+
+    if (!is_valid_ptr(buffer)) {
+        exit(-1);
+    }
+
+
+    lock_acquire(&fs_lock);
+
+
+    if (fd == STDIN) {
+        lock_release(&fs_lock);
+        return -1;
+    }
+
+
+    if (fd == STDOUT) {
+        putbuf(buffer, size);
+        lock_release(&fs_lock);
+        return size;
+    }
+
+
+    struct file_descriptor *fd_struct = get_open_file(fd);
+    if (fd_struct != NULL && fd_struct->file_struct != NULL) {
+        status = file_write(fd_struct->file_struct, buffer, size);
+    }
+
+
+    lock_release(&fs_lock);
+    return status;
+
+
+}
