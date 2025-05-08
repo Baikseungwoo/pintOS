@@ -1,3 +1,4 @@
+#include <stdint.h>
 #include "userprog/process.h"
 #include <debug.h>
 #include <inttypes.h>
@@ -17,6 +18,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/syscall.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -63,57 +65,98 @@ process_execute (const char *file_name)
 }
 
 
+
+
+
+
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
-{
+start_process(void *file_name_) {
   char *file_name = file_name_;
-  char *copy_file_name; //pointer to save the copy of file_name
-  char *argv[64]; //array to save the arguments
-  int argc = 0; //number of arguments
+  printf("start_process: raw file_name = %s\n", file_name);
+
+  char *copy_file_name;
+  char *argv[64];
+  int argc = 0;
   struct intr_frame if_;
   bool success;
 
-  copy_file_name = malloc(strlen(file_name) + 1); //allocate memory for copy_file_name
-  if (copy_file_name == NULL) //check if memory allocation was successful
+  // Make a copy of file_name
+  copy_file_name = malloc(strlen(file_name) + 1);
+  if (copy_file_name == NULL)
     thread_exit();
-  strlcpy(copy_file_name, file_name, strlen(file_name) + 1); //copy file_name to copy_file_name
+  strlcpy(copy_file_name, file_name, strlen(file_name) + 1);
 
-  char *token, *save_ptr; //token and save_ptr for strtok_r
-  for (token = strtok_r(copy_file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) {
-    argv[argc++] = token; //store the arguments in argv
+  // Tokenize command line
+  char *token, *save_ptr;
+  for (token = strtok_r(copy_file_name, " ", &save_ptr); token != NULL;
+       token = strtok_r(NULL, " ", &save_ptr)) {
+    argv[argc++] = token;
+  }
+  argv[argc] = NULL;
+
+  printf("start_process: parsed argc = %d\n", argc);
+  int i;
+  for (i = 0; i < argc; i++) {
+    printf("start_process: argv[%d] = '%s'\n", i, argv[i]);
   }
 
-  
-  /* Initialize interrupt frame and load executable. */
-  memset (&if_, 0, sizeof if_);
+  // Initialize interrupt frame
+  memset(&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (argv[0], &if_.eip, &if_.esp);
 
-  if(success) {
-    argument_stack(argv, argc, &if_.esp); //call argument_stack to set up the stack
-    hex_dump(if_.esp , if_.esp , PHYS_BASE - if_.esp , true);
+  void *user_stack_top;
+
+  success = load(argv[0], &if_.eip, &user_stack_top);
+  printf("start_process: load(%s) %s\n", argv[0], success ? "succeeded" : "failed");
+
+  if (success) {
+    // Initialize file descriptor table
+    struct thread *cur = thread_current();
+    cur->fdt = palloc_get_page(PAL_ZERO);
+    if (cur->fdt == NULL)
+      thread_exit();
+    cur->fdt->next_fd = 3;
+    cur->fdt->table[0] = NULL;
+    cur->fdt->table[1] = NULL;
+    cur->fdt->table[2] = NULL;
+
+    // Push arguments onto the stack
+    argument_stack(argv, argc, &user_stack_top);
+
+    // ✅ Stack page 매핑 (esp 기준)
+    void *esp_bottom = pg_round_down(user_stack_top);
+    if (pagedir_get_page(cur->pagedir, esp_bottom) == NULL) {
+      void *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+      if (kpage == NULL || !pagedir_set_page(cur->pagedir, esp_bottom, kpage, true)) {
+        printf("Failed to map stack page at %p\n", esp_bottom);
+        thread_exit();
+      }
+    }
+
+    if_.esp = user_stack_top;
+    printf("start_process: after argument_stack, esp = %p\n", if_.esp);
   }
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  free(copy_file_name); //free the allocated memory for copy_file_name
+  // Clean up
+  palloc_free_page(file_name);
+  free(copy_file_name);
 
-  if (!success) 
-    thread_exit ();
+  if (!success)
+    thread_exit();
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
-  asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
-  NOT_REACHED ();
+  printf("start_process: jumping to user code. eip = %p, esp = %p\n", if_.eip, if_.esp);
+
+  // Start user process
+  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
+  NOT_REACHED();
 }
+
+
+
 
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
@@ -178,43 +221,79 @@ process_activate (void)
   tss_update ();
 }
 
-void
-argument_stack(const char* argv[], int argc, void **esp){
-  uintptr_t arg_addr[128];   //array to save the addresses of the copy of arguments
+#include <string.h>          // for strlen, memcpy
+#include <stdio.h>           // for printf
+#include "threads/thread.h"  // for hex_dump
+#include "threads/vaddr.h"   // for PHYS_BASE
+
+void argument_stack(char *argv[], int argc, void **esp) {
+  char *arg_addr[128];
   int i;
-  for (i = argc - 1; i >= 0; i--) {   //reverse order because stack grows down
-    int len = strlen(argv[i]) + 1;      // the length of the argument + 1 for null terminator
-    *esp -= len;                    //reduce the stack pointer by the length of the argument
-    memcpy(*esp, argv[i], len);     //copy the argument to the stack
-    arg_addr[i] = (uintptr_t)(*esp);    //save the address of the copy of argument
+
+  printf("argument_stack: argc = %d\n", argc);
+
+  // 1. Push strings onto the stack
+  for (i = argc - 1; i >= 0; i--) {
+    int len = strlen(argv[i]) + 1;
+    *esp -= len;
+    memcpy(*esp, argv[i], len);
+    arg_addr[i] = *esp;
+
+    printf("  argv[%d] string copied to %p: '%s'\n", i, *esp, (char *)*esp);
   }
 
-  while ((uintptr_t)(*esp) % 4 != 0) {     //align the stack pointer to 4 bytes
+  // 2. Word align
+  while ((uintptr_t)(*esp) % 4 != 0) {
     *esp -= 1;
-    *(uint8_t *)(*esp) = 0;         //zero the remaining bytes
-  }                  
-  
-
-  *esp -= 4;             //reduce the stack pointer by the size of a pointer
-  *(uint32_t *)(*esp) = 0;     //null terminator for the last argument
-
-  for (i = argc - 1; i >= 0; i--) {     //push the addresses of the arguments to the stack
-    *esp -= 4;
-    *(uintptr_t *)(*esp) = arg_addr[i];
+    *(uint8_t *)(*esp) = 0;
   }
 
-  uintptr_t argv_start = (uintptr_t)(*esp);        //save the start address of the aaray of pointers to the arguments
+  // 3. Push NULL sentinel
+  *esp -= sizeof(char *);
+  *(char **)(*esp) = NULL;
 
-  *esp -= 4;       //push the start address of the array of pointers to the stack
-  *(uintptr_t *)(*esp) = argv_start;
+  // 4. Push argv[i] addresses
+  for (i = argc - 1; i >= 0; i--) {
+    *esp -= sizeof(char *);
+    *(char **)(*esp) = arg_addr[i];
+  }
 
-  *esp -= 4;
-  *(int *)*esp = argc;        //push the number of arguments to the stack
+  // 5. Save argv pointer
+  char **argv_start = (char **)(*esp);
 
-  *esp -= 4;      //push the return address
-  *(uintptr_t *)(*esp) = 0;         //In fact, there is no return address, so the value is 0
+  // 6. Push argv pointer
+  *esp -= sizeof(char **);
+  *(char ***)(*esp) = argv_start;
+
+  // 7. Push argc
+  *esp -= sizeof(int);
+  *(int *)(*esp) = argc;
+
+  // 8. Push fake return address
+  *esp -= sizeof(void *);
+  *(void **)(*esp) = 0;
+
+  // Debugging
+  printf("argument_stack: final esp = %p\n", *esp);
+  hex_dump((uintptr_t)(*esp), *esp, PHYS_BASE - (uintptr_t)(*esp), true);
+
+  // Traverse to verify
+  printf("Traversing argv from esp:\n");
+  int *esp_int = (int *)(*esp);
+  int pushed_argc = *(esp_int + 1);
+  char **pushed_argv = *(char ***)(esp_int + 2);
+
+  printf("  -> argc = %d\n", pushed_argc);
+  for (i = 0; i <= pushed_argc; i++) {
+    if (pushed_argv[i] != NULL)
+      printf("  -> argv[%d] = %s (addr = %p)\n", i, pushed_argv[i], pushed_argv[i]);
+    else
+      printf("  -> argv[%d] = NULL\n", i);
+  }
 }
-
+
+
+
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -298,19 +377,23 @@ load (const char *file_name, void (**eip) (void), void **esp)
   bool success = false;
   int i;
 
+
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
-
+printf("load: trying to open file %s\n", file_name);
   /* Open executable file. */
   file = filesys_open (file_name);
+  
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
       goto done; 
     }
+
+    printf("load: file opened successfully\n");
   
   file_deny_write (file);
 
@@ -388,7 +471,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Set up stack. */
   if (!setup_stack (esp))
-    goto done;
+  goto done;
+
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
@@ -400,6 +484,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
   file_close (file);
   return success;
 }
+
 
 /* load() helpers. */
 

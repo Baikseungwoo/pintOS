@@ -4,6 +4,7 @@
 #include "threads/thread.h"
 #include "filesys/file.h"
 
+
 typedef int tid_t;
 struct file_descriptor {
   int fd_num;
@@ -12,10 +13,14 @@ struct file_descriptor {
   struct list_elem elem;
 };
 
+
 struct fdt {
     struct file_descriptor *table[64];
     int next_fd;    
 };
+
+
+
 
 
 
@@ -26,7 +31,20 @@ int wait(tid_t pid);
 void exit(int status);
 void halt(void);
 int write(int fd, const void *buffer, unsigned size);
+int read (int fd, void *buffer, unsigned size);
+int open (const char *file);
+int filesize (int fd);
+void seek (int fd, unsigned position);
+unsigned tell (int fd);
+void close (int fd);
+bool create(const char *file_name, unsigned size);
+bool remove(const char *file_name);
+
+
 
 
 
 #endif /* userprog/syscall.h */
+
+
+
