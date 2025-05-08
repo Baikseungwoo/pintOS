@@ -5,6 +5,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 
 #ifdef USERPROG
@@ -131,8 +132,21 @@ struct thread
 
 #ifdef USERPROG    
     /* Owned by userprog/process.c. */
-    uint32_t *pagedir;    
-    struct fdt *fdt;               /* Page directory. */
+   uint32_t *pagedir;    
+   struct fdt *fdt;               /* Page directory. */
+
+   struct thread *parent;
+   struct list child_list;
+   struct list_elem child_elem;
+   struct semaphore wait_sema;
+   bool waited;
+
+
+   tid_t parent_id;
+   int child_load_status;
+   struct lock lock_child;
+   struct condition cond_child;
+   struct file *exec_file;
 #endif
    
 
@@ -205,6 +219,7 @@ void mlfqs_update_priority(struct thread *t);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 void donate_priority(void);
+struct thread *thread_get_by_id(tid_t tid);
 
 
 void refresh_priority(void);

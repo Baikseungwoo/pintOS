@@ -263,6 +263,11 @@ thread_create (const char *name, int priority,
 
   /* Initialize thread. */
   init_thread (t, name, priority);
+
+#ifdef USERPROG
+  t->parent_id = thread_current()->tid;
+#endif
+
   tid = t->tid = allocate_tid ();
 
 
@@ -671,6 +676,20 @@ thread_get_recent_cpu (void)
   else
     return 0;
 }
+
+
+struct thread *thread_get_by_id(tid_t tid) {
+    struct list_elem *e;
+    for (e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+        struct thread *t = list_entry(e, struct thread, allelem);
+        if (t->tid == tid)
+            return t;
+    }
+    return NULL;
+}
+
+
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
 
@@ -783,7 +802,12 @@ init_thread (struct thread *t, const char *name, int priority)
 
 
 #ifdef USERPROG
-  t->fdt = NULL;  // fdt는 나중에 process.c에서 초기화 (ex. start_process)
+  t->fdt = NULL;  //(ex. start_process)
+  t->child_load_status = 0;
+  lock_init(&t->lock_child);
+  cond_init(&t->cond_child);
+  list_init(&t->child_list);
+  t->waited = false;
 #endif
 }
 

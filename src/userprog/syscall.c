@@ -12,6 +12,7 @@
 #include "threads/synch.h"
 #include <stdlib.h>
 #include "threads/malloc.h"
+
 #define STDIN 0
 #define STDOUT 1
 #define STDERR 2
@@ -73,7 +74,7 @@ syscall_handler(struct intr_frame *f) {
             const void *buf   = (void *) ustack[2];
             unsigned size     = (unsigned)ustack[3];
 
-              /* buf 유효 범위 검사 */
+             
             if (buf == NULL
               || (size > 0
                   && (!is_valid_ptr(buf)
@@ -166,6 +167,14 @@ syscall_handler(struct intr_frame *f) {
             close((int)ustack[1]);
             break;
         }
+    case SYS_EXEC:
+        {
+            if (!is_valid_ptr(&ustack[1]))
+              exit(-1);
+            const char *cmd_line = (const char *) ustack[1];
+            f->eax = exec(cmd_line);
+            break;
+        }
 
     default:
         exit(-1);
@@ -199,11 +208,40 @@ int wait(tid_t pid) {
 
 
 void exit(int status) {
-    struct thread *t = thread_current();
-    t->exit_status = status;
-    printf("%s: exit(%d)\n", t->name, status);
+    struct thread *cur = thread_current();
+
+
+    cur->exit_status = status;
+    printf("%s: exit(%d)\n", cur->name, status);
+
+
+#ifdef USERPROG
+    struct thread *parent = thread_get_by_id(cur->parent_id);
+
+
+    if (parent != NULL) {
+        lock_acquire(&parent->lock_child);
+
+
+        struct list_elem *e;
+        for (e = list_begin(&parent->child_list); e != list_end(&parent->child_list); e = list_next(e)) {
+            struct child_status *child = list_entry(e, struct child_status, elem);
+            if (child->child_id == cur->tid) {
+                child->is_exit_called = true;
+                child->child_exit_status = status;
+                break;
+            }
+        }
+
+
+        lock_release(&parent->lock_child);
+    }
+#endif
+
+
     thread_exit();
 }
+
 
 
 
@@ -495,3 +533,46 @@ close_open_file(int fd) {
     }
   }
 }
+
+tid_t exec(const char *cmd_line) {
+  tid_t tid;
+  struct thread *cur = thread_current();
+
+
+  if (!is_valid_ptr(cmd_line)) {
+    exit(-1);
+  }
+
+
+  char *cmd_copy = palloc_get_page(0);
+  if (cmd_copy == NULL) return -1;
+  strlcpy(cmd_copy, cmd_line, PGSIZE);
+
+
+  cur->child_load_status = 0;
+
+
+  tid = process_execute(cmd_copy);
+  if (tid == TID_ERROR) {
+    palloc_free_page(cmd_copy);
+    return -1;
+  }
+
+
+  lock_acquire(&cur->lock_child);
+
+
+  while (cur->child_load_status == 0)
+    cond_wait(&cur->cond_child, &cur->lock_child);
+
+
+  if (cur->child_load_status == -1)
+    tid = -1;
+
+
+  lock_release(&cur->lock_child);
+
+
+  return tid;
+}
+

@@ -39,6 +39,7 @@ unsigned tell (int fd);
 void close (int fd);
 bool create(const char *file_name, unsigned size);
 bool remove(const char *file_name);
+tid_t exec(const char *cmd_line);
 
 
 

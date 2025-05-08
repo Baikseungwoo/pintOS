@@ -19,6 +19,7 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/syscall.h"
+#include "userprog/process.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -61,9 +62,29 @@ process_execute (const char *file_name)
  
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy);
+    if (tid == TID_ERROR) {
+    palloc_free_page (fn_copy);
+    return TID_ERROR;
+  }
+
+#ifdef USERPROG
+  struct thread *cur = thread_current();
+
+  /* Allocate a child_status structure to track the new child process. */
+  struct child_status *child = calloc(1, sizeof *child);
+  if (child == NULL)
+    return TID_ERROR;
+
+  child->child_id = tid;                      // Save the child's tid
+  child->is_exit_called = false;             // Mark as not exited
+  child->has_been_waited = false;            // Not waited yet
+
+  list_push_back(&cur->child_list, &child->elem);  // Add to parent's child list
+#endif
+
   return tid;
 }
-
+  
 
 
 
@@ -113,48 +134,60 @@ start_process(void *file_name_) {
   success = load(argv[0], &if_.eip, &user_stack_top);
   printf("start_process: load(%s) %s\n", argv[0], success ? "succeeded" : "failed");
 
-  if (success) {
-    // Initialize file descriptor table
-    struct thread *cur = thread_current();
-    cur->fdt = palloc_get_page(PAL_ZERO);
-    if (cur->fdt == NULL)
-      thread_exit();
-    cur->fdt->next_fd = 3;
-    cur->fdt->table[0] = NULL;
-    cur->fdt->table[1] = NULL;
-    cur->fdt->table[2] = NULL;
+  // Pass load result to parent
+  struct thread *cur = thread_current();
+  struct thread *parent = thread_get_by_id(cur->parent_id);
 
-    // Push arguments onto the stack
-    argument_stack(argv, argc, &user_stack_top);
+  if (parent != NULL) {
+    lock_acquire(&parent->lock_child);
+    if (success)
+      parent->child_load_status = 1; // success
+    else
+      parent->child_load_status = -1; // failure
 
-    // ✅ Stack page 매핑 (esp 기준)
-    void *esp_bottom = pg_round_down(user_stack_top);
-    if (pagedir_get_page(cur->pagedir, esp_bottom) == NULL) {
-      void *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
-      if (kpage == NULL || !pagedir_set_page(cur->pagedir, esp_bottom, kpage, true)) {
-        printf("Failed to map stack page at %p\n", esp_bottom);
-        thread_exit();
-      }
-    }
-
-    if_.esp = user_stack_top;
-    printf("start_process: after argument_stack, esp = %p\n", if_.esp);
+    cond_signal(&parent->cond_child, &parent->lock_child);
+    lock_release(&parent->lock_child);
   }
 
-  // Clean up
+  // On failure, terminate thread after signaling parent
+  if (!success) {
+    thread_exit();
+  }
+
+  // Initialize file descriptor table
+  cur->fdt = palloc_get_page(PAL_ZERO);
+  if (cur->fdt == NULL)
+    thread_exit();
+  cur->fdt->next_fd = 3;
+  cur->fdt->table[0] = NULL;
+  cur->fdt->table[1] = NULL;
+  cur->fdt->table[2] = NULL;
+
+  // Push arguments onto user stack
+  argument_stack(argv, argc, &user_stack_top);
+
+  // Ensure stack page is mapped
+  void *esp_bottom = pg_round_down(user_stack_top);
+  if (pagedir_get_page(cur->pagedir, esp_bottom) == NULL) {
+    void *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+    if (kpage == NULL || !pagedir_set_page(cur->pagedir, esp_bottom, kpage, true)) {
+      printf("Failed to map stack page at %p\n", esp_bottom);
+      thread_exit();
+    }
+  }
+  if_.esp = user_stack_top;
+  printf("start_process: after argument_stack, esp = %p\n", if_.esp);
+
+  // Free copies
   palloc_free_page(file_name);
   free(copy_file_name);
 
-  if (!success)
-    thread_exit();
-
   printf("start_process: jumping to user code. eip = %p, esp = %p\n", if_.eip, if_.esp);
 
-  // Start user process
+  // Jump to user code
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
   NOT_REACHED();
 }
-
 
 
 
@@ -167,41 +200,89 @@ start_process(void *file_name_) {
 
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
-int
-process_wait (tid_t child_tid UNUSED) 
-{
-  volatile int i;
-    for(i=0; i<1000000000; i++)
-  {
-  }
+int process_wait(tid_t child_id) {
+    struct thread *cur = thread_current(); 
+    struct list_elem *e;
+    struct child_status *child_stat = NULL;
 
-  return -1;
+    // 1. Find child_status for given tid
+    for (e = list_begin(&cur->child_list); e != list_end(&cur->child_list); e = list_next(e)) {
+        struct child_status *entry = list_entry(e, struct child_status, elem);
+        if (entry->child_id == child_id) {
+            child_stat = entry;
+            break;
+        }
+    }
+
+    // 2. Not a child
+    if (child_stat == NULL)
+        return -1;
+
+    // 3. Already waited
+    if (child_stat->has_been_waited)
+        return -1;
+
+    // 4. Mark as waited
+    child_stat->has_been_waited = true;
+
+    // 5. Wait for child to exit
+    struct thread *cur_thread = thread_current();
+    lock_acquire(&cur_thread->lock_child);
+    while (!child_stat->is_exit_called)
+        cond_wait(&cur_thread->cond_child, &cur_thread->lock_child);
+    lock_release(&cur_thread->lock_child);
+
+    // 6. Return exit status
+    return child_stat->child_exit_status;
 }
 
+
 /* Free the current process's resources. */
-void
 process_exit (void)
 {
   struct thread *cur = thread_current ();
   uint32_t *pd;
 
-  /* Destroy the current process's page directory and switch back
-     to the kernel-only page directory. */
+
+#ifdef USERPROG
+
+
+  if (cur->exec_file != NULL) {
+    file_allow_write(cur->exec_file);
+    file_close(cur->exec_file);
+    cur->exec_file = NULL;
+  }
+
+
+
+
+  while (!list_empty(&cur->child_list)) {
+    struct list_elem *e = list_pop_front(&cur->child_list);
+    struct child_status *cs = list_entry(e, struct child_status, elem);
+    free(cs);
+  }
+
+
+
+
+  struct thread *parent = thread_get_by_id(cur->parent_id);
+  if (parent != NULL) {
+    lock_acquire(&parent->lock_child);
+    cond_signal(&parent->cond_child, &parent->lock_child);
+    lock_release(&parent->lock_child);
+  }
+#endif
+
+
   pd = cur->pagedir;
-  if (pd != NULL) 
+  if (pd != NULL)
     {
-      /* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
 }
+
 
 
 
