@@ -191,12 +191,6 @@ bool is_valid_ptr(const void *usr_ptr) {
     void *mapped_page = pagedir_get_page(cur->pagedir, usr_ptr);
     bool mapped = mapped_page != NULL;
 
-    if (!not_null || !in_user_space || !mapped) {
-        printf("[is_valid_ptr FAIL] ptr = %p\n", usr_ptr);
-        printf("  - not_null: %d\n", not_null);
-        printf("  - is_user_vaddr: %d\n", in_user_space);
-        printf("  - pagedir_get_page: %p\n", mapped_page);
-    }
 
     return not_null && in_user_space && mapped;
 }
@@ -263,17 +257,14 @@ file_descriptor *get_open_file(int fd){
 
 
 int write(int fd, const void *buffer, unsigned size) {
-    printf("[write] fd = %d, buffer = %p, size = %u\n", fd, buffer, size);
 
     if (!is_valid_ptr(buffer)) {
-        printf("[write] Invalid pointer detected. Exiting.\n");
         exit(-1);
     }
 
     lock_acquire(&fs_lock);
 
     if (fd == STDOUT) {
-        printf("[write] writing to stdout via putbuf\n");
         putbuf(buffer, size);
         lock_release(&fs_lock);
         return size;

@@ -95,7 +95,6 @@ process_execute (const char *file_name)
 static void
 start_process(void *file_name_) {
   char *file_name = file_name_;
-  printf("start_process: raw file_name = %s\n", file_name);
 
   char *copy_file_name;
   char *argv[64];
@@ -117,11 +116,8 @@ start_process(void *file_name_) {
   }
   argv[argc] = NULL;
 
-  printf("start_process: parsed argc = %d\n", argc);
-  int i;
-  for (i = 0; i < argc; i++) {
-    printf("start_process: argv[%d] = '%s'\n", i, argv[i]);
-  }
+
+
 
   // Initialize interrupt frame
   memset(&if_, 0, sizeof if_);
@@ -132,7 +128,7 @@ start_process(void *file_name_) {
   void *user_stack_top;
 
   success = load(argv[0], &if_.eip, &user_stack_top);
-  printf("start_process: load(%s) %s\n", argv[0], success ? "succeeded" : "failed");
+
 
   // Pass load result to parent
   struct thread *cur = thread_current();
@@ -171,18 +167,15 @@ start_process(void *file_name_) {
   if (pagedir_get_page(cur->pagedir, esp_bottom) == NULL) {
     void *kpage = palloc_get_page(PAL_USER | PAL_ZERO);
     if (kpage == NULL || !pagedir_set_page(cur->pagedir, esp_bottom, kpage, true)) {
-      printf("Failed to map stack page at %p\n", esp_bottom);
       thread_exit();
     }
   }
   if_.esp = user_stack_top;
-  printf("start_process: after argument_stack, esp = %p\n", if_.esp);
 
   // Free copies
   palloc_free_page(file_name);
   free(copy_file_name);
 
-  printf("start_process: jumping to user code. eip = %p, esp = %p\n", if_.eip, if_.esp);
 
   // Jump to user code
   asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&if_) : "memory");
@@ -311,7 +304,7 @@ void argument_stack(char *argv[], int argc, void **esp) {
   char *arg_addr[128];
   int i;
 
-  printf("argument_stack: argc = %d\n", argc);
+
 
   // 1. Push strings onto the stack
   for (i = argc - 1; i >= 0; i--) {
@@ -320,7 +313,7 @@ void argument_stack(char *argv[], int argc, void **esp) {
     memcpy(*esp, argv[i], len);
     arg_addr[i] = *esp;
 
-    printf("  argv[%d] string copied to %p: '%s'\n", i, *esp, (char *)*esp);
+
   }
 
   // 2. Word align
@@ -355,22 +348,17 @@ void argument_stack(char *argv[], int argc, void **esp) {
   *(void **)(*esp) = 0;
 
   // Debugging
-  printf("argument_stack: final esp = %p\n", *esp);
+
   hex_dump((uintptr_t)(*esp), *esp, PHYS_BASE - (uintptr_t)(*esp), true);
 
   // Traverse to verify
-  printf("Traversing argv from esp:\n");
+
   int *esp_int = (int *)(*esp);
   int pushed_argc = *(esp_int + 1);
   char **pushed_argv = *(char ***)(esp_int + 2);
 
-  printf("  -> argc = %d\n", pushed_argc);
-  for (i = 0; i <= pushed_argc; i++) {
-    if (pushed_argv[i] != NULL)
-      printf("  -> argv[%d] = %s (addr = %p)\n", i, pushed_argv[i], pushed_argv[i]);
-    else
-      printf("  -> argv[%d] = NULL\n", i);
-  }
+
+
 }
 
 
@@ -464,17 +452,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
-printf("load: trying to open file %s\n", file_name);
+
   /* Open executable file. */
   file = filesys_open (file_name);
   
   if (file == NULL) 
-    {
-      printf ("load: %s: open failed\n", file_name);
+    
       goto done; 
     }
 
-    printf("load: file opened successfully\n");
+  
   
   file_deny_write (file);
 
@@ -487,7 +474,7 @@ printf("load: trying to open file %s\n", file_name);
       || ehdr.e_phentsize != sizeof (struct Elf32_Phdr)
       || ehdr.e_phnum > 1024) 
     {
-      printf ("load: %s: error loading executable\n", file_name);
+  
       goto done; 
     }
 
